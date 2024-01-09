@@ -1,7 +1,10 @@
-import express from 'express';
-import Database from 'better-sqlite3';
+const express = require('express');
+const Database = require('better-sqlite3');
+const cors = require('cors');
+
 
 const app = express();
+app.use(cors()); // Enable CORS for all routes
 
 app.use(express.json());
 
@@ -54,7 +57,7 @@ const validatePriority = (priority) => {
   if (Number.isNaN(priority)) {
     return {
       valid: false,
-      messageObj: {
+      messageObjPriority: {
       'message': 'Invalid priority provided.',
       'long_message': 'Priority can only be positive integer.',
       },
@@ -80,6 +83,8 @@ app.get('/api/v1/clients', (req, res) => {
       });
     }
     const clients = db.prepare('select * from clients where status = ?').all(status);
+    // sort clients by priority
+    clients.sort((a, b) => a.priority - b.priority);
     return res.status(200).send(clients);
   }
   const statement = db.prepare('select * from clients');
@@ -120,16 +125,72 @@ app.put('/api/v1/clients/:id', (req, res) => {
   if (!valid) {
     res.status(400).send(messageObj);
   }
+  console.log(req.body)
 
-  let { status, priority } = req.body;
+  let { status: newStatus, priority: newPriority } = req.body;
   let clients = db.prepare('select * from clients').all();
   const client = clients.find(client => client.id === id);
+  let oldPriority = client.priority;
+  let oldStatus = client.status;
+  console.log(`oldPriority: ${oldPriority}, oldStatus: ${oldStatus}`)
+  console.log(`newPriority: ${newPriority}, newStatus: ${newStatus}`)
 
   /* ---------- Update code below ----------*/
+  // if status is provided, update the client status
+  if (newStatus) {
+    // status can only be either 'backlog' | 'in-progress' | 'complete'
+    if (newStatus !== 'backlog' && newStatus !== 'in-progress' && newStatus !== 'complete') {
+      return res.status(400).send({
+        'message': 'Invalid status provided.',
+        'long_message': 'Status can only be one of the following: [backlog | in-progress | complete].',
+      });
+    }
+    // update client status
+    db.prepare('update clients set status = ? where id = ?').run(newStatus, id);
+    // update clients
+    clients = db.prepare('select * from clients').all();
+    // update client
+    client.status = newStatus;
+  }
 
+  
+  // if priority is provided, update the client priority
+  if (newPriority) {
+    // validate the priority
+    const { valid: validPriority, messageObjPriority } = validatePriority(newPriority);
+    if (!validPriority) {
+      res.status(400).send(messageObjPriority);
+    }
+    // update client priority
+    db.prepare('update clients set priority = ? where id = ?').run(newPriority, id);
+    // update clients
+    clients = db.prepare('select * from clients').all();
+    // update client
+    client.priority = newPriority;
 
+    if (oldStatus !== client.status) {
+      // update priority of all clients with the same old status
+      db.prepare('update clients set priority = priority - 1 where status = ? and priority > ?').run(oldStatus, oldPriority);
+      oldPriority = +Infinity;
+    }
 
-  return res.status(200).send(clients);
+    // check if the priority is going up or down
+    // if priority is going up
+    if (newPriority < oldPriority) {
+      // update priority of all clients with the same status and priority >= new priority
+      db.prepare('update clients set priority = priority + 1 where status = ? and priority >= ? and priority < ? and id != ?').run(client.status, newPriority, oldPriority, id);
+      // update clients
+      clients = db.prepare('select * from clients').all();
+    }
+    // if priority is going down
+    if (newPriority > oldPriority) {
+      // update priority of all clients with the same status and priority <= new priority
+      db.prepare('update clients set priority = priority - 1 where status = ? and priority <= ? and priority > ? and id != ?').run(client.status, newPriority, oldPriority, id);
+      // update clients
+      clients = db.prepare('select * from clients').all();
+    }
+  }
+  return res.status(200).send(client);
 });
 
 app.listen(3001);
